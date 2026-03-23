@@ -241,19 +241,22 @@ def main():
         if meta is not None:
             st.divider()
             st.subheader("Display")
-            display_mode = st.radio(
-                "Mode", ["Composite", "Selected Channel"], horizontal=True
-            )
 
             ch_names = []
             for i in range(meta.num_channels):
                 color = meta.channel_colors[i] if i < len(meta.channel_colors) else "?"
                 ch_names.append(f"Ch{i+1} ({color})")
 
-            selected_channel = 0
-            if display_mode == "Selected Channel" and meta.num_channels > 1:
-                selected_channel = st.selectbox("Channel", range(len(ch_names)),
-                                                format_func=lambda i: ch_names[i])
+            # Default to first channel, not composite
+            display_options = ch_names + (["Composite"] if meta.num_channels > 1 else [])
+            display_choice = st.radio("Channel", display_options, horizontal=True)
+
+            if display_choice == "Composite":
+                display_mode = "Composite"
+                selected_channel = 0
+            else:
+                display_mode = "Selected Channel"
+                selected_channel = display_options.index(display_choice)
 
         # ── Detection controls ───────────────────────────────────────────
         if meta is not None:
@@ -392,121 +395,154 @@ def main():
     if guvs:
         rgb = draw_guv_overlay(rgb, guvs, highlight_id, excluded_ids)
 
-    st.image(rgb, use_container_width=True)
-
-    # ── Overlap warnings ────────────────────────────────────────────────
+    # ── Tabbed layout: Image | Overlaps | Results ────────────────────
     overlap_groups = st.session_state.overlap_groups
-    if overlap_groups:
-        st.subheader("Overlap Warning")
-        all_overlap_ids = {gid for grp in overlap_groups for gid in grp.guv_ids}
-        st.warning(
-            f"{len(overlap_groups)} overlap group(s) found "
-            f"({len(all_overlap_ids)} GUVs involved). "
-            "Overlapping GUVs may corrupt fluorescence measurements."
-        )
-
-        # Group selector
-        group_names = [f"Group {g.group_id} — GUVs {g.guv_ids}" for g in overlap_groups]
-        selected_group_idx = st.selectbox(
-            "Select group", range(len(group_names)),
-            format_func=lambda i: group_names[i],
-            key="overlap_group_select",
-        )
-        st.session_state.selected_group_idx = selected_group_idx
-
-        # Magnified crop of the selected group
-        group = overlap_groups[selected_group_idx]
-        x_min, y_min, x_max, y_max = group.bbox
-        crop = rgb[y_min:y_max, x_min:x_max].copy()
-        if crop.size > 0:
-            st.image(crop, caption=f"Group {group.group_id} magnified", width=400)
-
-        # Per-GUV checkboxes
-        guv_map = {g.id: g for g in guvs}
-        st.write("**Include/exclude GUVs in this group** (uncheck to exclude):")
-        for gid in group.guv_ids:
-            guv = guv_map.get(gid)
-            if guv is None:
-                continue
-            if meta.scale_um_per_px is not None:
-                d_um = guv.diameter_px * meta.scale_um_per_px
-                label = f"GUV #{gid}  (d={d_um:.1f} \u00b5m)"
-            else:
-                label = f"GUV #{gid}  (d={guv.diameter_px:.0f} px)"
-            included = st.checkbox(
-                label,
-                value=(gid not in excluded_ids),
-                key=f"overlap_cb_{gid}",
-            )
-            if included and gid in excluded_ids:
-                st.session_state.excluded_ids.discard(gid)
-                st.rerun()
-            elif not included and gid not in excluded_ids:
-                st.session_state.excluded_ids.add(gid)
-                st.rerun()
-
-        # Nuke button
-        if st.button("Exclude All Overlapping", type="primary"):
-            st.session_state.excluded_ids |= all_overlap_ids
-            st.rerun()
-
-    # ── Results table & export ───────────────────────────────────────────
     df: pd.DataFrame | None = st.session_state.results_df
+
+    tab_names = ["Image"]
+    if overlap_groups:
+        tab_names.append(f"Overlaps ({len(overlap_groups)})")
     if df is not None and not df.empty:
-        st.subheader(f"Results — {len(df)} GUV(s) detected")
+        tab_names.append(f"Results ({len(df)})")
 
-        if not meta.quantitative:
+    tabs = st.tabs(tab_names)
+    tab_idx = 0
+
+    # ── Image tab ────────────────────────────────────────────────────
+    with tabs[tab_idx]:
+        # Downscale for display — cap at 800px wide to avoid excessive zoom
+        h, w = rgb.shape[:2]
+        max_display_w = 800
+        if w > max_display_w:
+            scale_factor = max_display_w / w
+            display_h = int(h * scale_factor)
+            display_rgb = cv2.resize(rgb, (max_display_w, display_h),
+                                     interpolation=cv2.INTER_AREA)
+        else:
+            display_rgb = rgb
+        st.image(display_rgb, use_container_width=False)
+
+        # Summary line under image
+        if guvs:
+            n_excluded = len(excluded_ids)
+            n_overlaps = len(overlap_groups)
+            summary = f"**{len(guvs)} GUV(s) detected**"
+            if n_overlaps:
+                summary += f" · {n_overlaps} overlap group(s)"
+            if n_excluded:
+                summary += f" · {n_excluded} excluded"
+            st.caption(summary)
+    tab_idx += 1
+
+    # ── Overlaps tab ─────────────────────────────────────────────────
+    if overlap_groups:
+        with tabs[tab_idx]:
+            all_overlap_ids = {gid for grp in overlap_groups for gid in grp.guv_ids}
             st.warning(
-                "This image format does not preserve quantitative fluorescence values. "
-                "Fluorescence measurements are relative only."
+                f"{len(overlap_groups)} overlap group(s) found "
+                f"({len(all_overlap_ids)} GUVs involved). "
+                "Overlapping GUVs may corrupt fluorescence measurements."
             )
 
-        # Interactive dataframe with row selection
-        event = st.dataframe(
-            df,
-            on_select="rerun",
-            selection_mode="single-row",
-            use_container_width=True,
-        )
+            # Group selector
+            group_names = [f"Group {g.group_id} — GUVs {g.guv_ids}" for g in overlap_groups]
+            selected_group_idx = st.selectbox(
+                "Select group", range(len(group_names)),
+                format_func=lambda i: group_names[i],
+                key="overlap_group_select",
+            )
+            st.session_state.selected_group_idx = selected_group_idx
 
-        # Handle row selection → highlight GUV
-        if event and event.selection and event.selection.rows:
-            row_idx = event.selection.rows[0]
-            selected_id = int(df.iloc[row_idx]["ID"])
-            if selected_id != st.session_state.highlight_id:
-                st.session_state.highlight_id = selected_id
+            # Magnified crop of the selected group
+            group = overlap_groups[selected_group_idx]
+            x_min, y_min, x_max, y_max = group.bbox
+            crop = rgb[y_min:y_max, x_min:x_max].copy()
+            if crop.size > 0:
+                st.image(crop, caption=f"Group {group.group_id} magnified", width=400)
+
+            # Per-GUV checkboxes
+            guv_map = {g.id: g for g in guvs}
+            st.write("**Include/exclude GUVs in this group** (uncheck to exclude):")
+            for gid in group.guv_ids:
+                guv = guv_map.get(gid)
+                if guv is None:
+                    continue
+                if meta.scale_um_per_px is not None:
+                    d_um = guv.diameter_px * meta.scale_um_per_px
+                    label = f"GUV #{gid}  (d={d_um:.1f} \u00b5m)"
+                else:
+                    label = f"GUV #{gid}  (d={guv.diameter_px:.0f} px)"
+                included = st.checkbox(
+                    label,
+                    value=(gid not in excluded_ids),
+                    key=f"overlap_cb_{gid}",
+                )
+                if included and gid in excluded_ids:
+                    st.session_state.excluded_ids.discard(gid)
+                    st.rerun()
+                elif not included and gid not in excluded_ids:
+                    st.session_state.excluded_ids.add(gid)
+                    st.rerun()
+
+            # Nuke button
+            if st.button("Exclude All Overlapping", type="primary"):
+                st.session_state.excluded_ids |= all_overlap_ids
                 st.rerun()
+        tab_idx += 1
 
-        # Export buttons — filter excluded GUVs
-        active_measurements = filter_active_measurements(st.session_state.measurements)
-        # Mark excluded on guvs so filter works
-        for m in st.session_state.measurements:
-            m.guv.excluded = (m.guv.id in st.session_state.excluded_ids)
-        active_measurements = filter_active_measurements(st.session_state.measurements)
-        export_scale = meta.scale_um_per_px if meta else None
-        export_colors = meta.channel_colors if meta else None
-        export_df = build_dataframe(active_measurements, export_scale, export_colors)
+    # ── Results tab ──────────────────────────────────────────────────
+    if df is not None and not df.empty:
+        with tabs[tab_idx]:
+            if not meta.quantitative:
+                st.warning(
+                    "This image format does not preserve quantitative fluorescence values. "
+                    "Fluorescence measurements are relative only."
+                )
 
-        col1, col2 = st.columns(2)
-        with col1:
-            csv_data = export_df.to_csv(index=False).encode("utf-8")
-            st.download_button(
-                "Download CSV",
-                data=csv_data,
-                file_name="guv_results.csv",
-                mime="text/csv",
+            # Interactive dataframe with row selection
+            event = st.dataframe(
+                df,
+                on_select="rerun",
+                selection_mode="single-row",
                 use_container_width=True,
             )
-        with col2:
-            buf = io.BytesIO()
-            export_df.to_excel(buf, index=False, engine="openpyxl")
-            st.download_button(
-                "Download Excel",
-                data=buf.getvalue(),
-                file_name="guv_results.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                use_container_width=True,
-            )
+
+            # Handle row selection → highlight GUV
+            if event and event.selection and event.selection.rows:
+                row_idx = event.selection.rows[0]
+                selected_id = int(df.iloc[row_idx]["ID"])
+                if selected_id != st.session_state.highlight_id:
+                    st.session_state.highlight_id = selected_id
+                    st.rerun()
+
+            # Export buttons — filter excluded GUVs
+            for m in st.session_state.measurements:
+                m.guv.excluded = (m.guv.id in st.session_state.excluded_ids)
+            active_measurements = filter_active_measurements(st.session_state.measurements)
+            export_scale = meta.scale_um_per_px if meta else None
+            export_colors = meta.channel_colors if meta else None
+            export_df = build_dataframe(active_measurements, export_scale, export_colors)
+
+            col1, col2 = st.columns(2)
+            with col1:
+                csv_data = export_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download CSV",
+                    data=csv_data,
+                    file_name="guv_results.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            with col2:
+                buf = io.BytesIO()
+                export_df.to_excel(buf, index=False, engine="openpyxl")
+                st.download_button(
+                    "Download Excel",
+                    data=buf.getvalue(),
+                    file_name="guv_results.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
 
 
 if __name__ == "__main__":
