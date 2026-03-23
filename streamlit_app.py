@@ -17,7 +17,7 @@ from guv_analyzer.model.image_loader import load_image, get_lif_series_list, Ima
 from guv_analyzer.model.guv_detector import detect_guvs, DetectionParams, DetectedGUV, find_overlaps
 from guv_analyzer.model.fluorescence import measure_all_channels
 from guv_analyzer.model.guv_data import GUVMeasurement, build_dataframe, filter_active_measurements
-from guv_analyzer.feedback import CATEGORIES, open_feedback
+from guv_analyzer.feedback import FEEDBACK_CONFIG as _FB_CONFIG
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -367,20 +367,8 @@ def main():
             st.rerun()
 
         st.divider()
-        with st.expander("Feedback"):
-            fb_category = st.selectbox("Category", CATEGORIES, key="fb_category")
-            fb_text = st.text_area(
-                "Description",
-                placeholder="Describe the bug or request...",
-                key="fb_text",
-            )
-            if st.button("Submit", key="fb_submit"):
-                if fb_text.strip():
-                    image_format = meta.filepath.suffix if meta else None
-                    open_feedback(fb_category, fb_text, image_format)
-                    st.success("Feedback page opened!")
-                else:
-                    st.warning("Please enter a description.")
+        st.link_button("Send Feedback", _FB_CONFIG["google_form_url"],
+                       use_container_width=True)
 
     # ── LEFT COLUMN: Image + tabs ────────────────────────────────────────
     with main_col:

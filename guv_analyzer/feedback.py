@@ -18,10 +18,10 @@ from . import __version__
 #   "mailto"      → opens the user's email client
 
 FEEDBACK_CONFIG = {
-    "method": "github",
+    "method": "google_form",
     "github_url": "https://github.com/bshlee/guv-analyzer/issues/new",
     "github_labels": "feedback",
-    "google_form_url": "",
+    "google_form_url": "https://forms.gle/MJ99t5sCFz4Dw47Y9",
     "mailto_address": "",
 }
 
