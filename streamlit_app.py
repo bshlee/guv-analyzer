@@ -162,216 +162,95 @@ def _init_state():
 def main():
     _init_state()
 
-    st.title("GUV Analyzer")
+    # ── CSS: sticky top bar ──────────────────────────────────────────────
+    st.markdown("""
+    <style>
+    div[data-testid="stVerticalBlockBorderWrapper"]:has(
+        > div > div > div > div[data-testid="stMarkdown"] > div > p > span.top-bar-marker
+    ) {
+        position: sticky;
+        top: 0;
+        z-index: 999;
+        background: var(--background-color, #0e1117);
+        padding: 0.25rem 0;
+        border-bottom: 1px solid rgba(250,250,250,0.1);
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
-    # ── SIDEBAR ──────────────────────────────────────────────────────────
-    with st.sidebar:
-        st.header("File Upload")
-        uploaded = st.file_uploader(
-            "Upload a microscopy image",
-            type=["tif", "tiff", "lif", "jpg", "jpeg", "png"],
-        )
+    # ── TOP BAR: file upload + image info (sticky) ───────────────────────
+    with st.container(border=True):
+        # Hidden marker for CSS sticky targeting
+        st.markdown('<span class="top-bar-marker"></span>', unsafe_allow_html=True)
 
-        series_index = 0
+        top_left, top_right = st.columns([1, 2])
 
-        if uploaded is not None:
-            file_bytes = uploaded.getvalue()
-            file_id = f"{uploaded.name}_{len(file_bytes)}"
-
-            # LIF series selector
-            if uploaded.name.lower().endswith(".lif"):
-                try:
-                    series_list = cached_lif_series(file_bytes, uploaded.name)
-                except Exception as e:
-                    st.error(f"Failed to read .lif file: {e}")
-                    return
-                if len(series_list) > 1:
-                    series_names = [
-                        f"{name} ({w}x{h}, {nc}ch)"
-                        for name, (w, h, *_), nc in series_list
-                    ]
-                    series_index = st.selectbox(
-                        "Select series", range(len(series_names)),
-                        format_func=lambda i: series_names[i],
-                    )
-
-            # Load image if new file or different series
-            needs_load = (
-                file_id != st.session_state.uploaded_file_id
-                or series_index != st.session_state.series_index
+        with top_left:
+            uploaded = st.file_uploader(
+                "Upload image",
+                type=["tif", "tiff", "lif", "jpg", "jpeg", "png"],
+                label_visibility="collapsed",
             )
-            if needs_load:
-                try:
-                    channel_data, metadata = cached_load_image(
-                        file_bytes, uploaded.name, series_index
-                    )
-                except Exception as e:
-                    st.error(f"Failed to load image: {e}")
-                    return
-                st.session_state.channel_data = channel_data
-                st.session_state.metadata = metadata
-                st.session_state.uploaded_file_id = file_id
-                st.session_state.series_index = series_index
-                # Clear previous detection
-                st.session_state.guvs = []
-                st.session_state.measurements = []
-                st.session_state.results_df = None
-                st.session_state.highlight_id = None
-                st.session_state.overlap_groups = []
-                st.session_state.excluded_ids = set()
-                st.session_state.selected_group_idx = 0
 
-        # ── Metadata ─────────────────────────────────────────────────────
-        meta: ImageMetadata | None = st.session_state.metadata
-        if meta is not None:
-            st.divider()
-            st.subheader("Image Info")
-            st.text(f"File: {meta.filepath.name}")
-            st.text(f"Size: {meta.width} x {meta.height}")
-            st.text(f"Channels: {meta.num_channels}")
-            st.text(f"Dtype: {meta.dtype}")
-            if meta.scale_um_per_px is not None:
-                st.text(f"Scale: {meta.scale_um_per_px:.4f} µm/px")
-            else:
-                st.text("Scale: unknown")
-            if meta.quantitative:
-                st.text("Quantitative: Yes")
+            series_index = 0
+            if uploaded is not None:
+                file_bytes = uploaded.getvalue()
+                file_id = f"{uploaded.name}_{len(file_bytes)}"
 
-        # ── Display controls ─────────────────────────────────────────────
-        if meta is not None:
-            st.divider()
-            st.subheader("Display")
+                # LIF series selector
+                if uploaded.name.lower().endswith(".lif"):
+                    try:
+                        series_list = cached_lif_series(file_bytes, uploaded.name)
+                    except Exception as e:
+                        st.error(f"Failed to read .lif file: {e}")
+                        return
+                    if len(series_list) > 1:
+                        series_names = [
+                            f"{name} ({w}x{h}, {nc}ch)"
+                            for name, (w, h, *_), nc in series_list
+                        ]
+                        series_index = st.selectbox(
+                            "Select series", range(len(series_names)),
+                            format_func=lambda i: series_names[i],
+                        )
 
-            ch_names = []
-            for i in range(meta.num_channels):
-                color = meta.channel_colors[i] if i < len(meta.channel_colors) else "?"
-                ch_names.append(f"Ch{i+1} ({color})")
-
-            # Default to first channel, not composite
-            display_options = ch_names + (["Composite"] if meta.num_channels > 1 else [])
-            display_choice = st.radio("Channel", display_options, horizontal=True)
-
-            if display_choice == "Composite":
-                display_mode = "Composite"
-                selected_channel = 0
-            else:
-                display_mode = "Selected Channel"
-                selected_channel = display_options.index(display_choice)
-
-        # ── Detection controls ───────────────────────────────────────────
-        if meta is not None:
-            st.divider()
-            st.subheader("Detection Parameters")
-
-            det_channel = 0
-            if meta.num_channels > 1:
-                det_channel = st.selectbox(
-                    "Detection channel", range(len(ch_names)),
-                    format_func=lambda i: ch_names[i],
-                    key="det_ch",
+                # Load image if new file or different series
+                needs_load = (
+                    file_id != st.session_state.uploaded_file_id
+                    or series_index != st.session_state.series_index
                 )
-
-            # Scale-aware defaults: typical GUV diameter 5–50 µm
-            default_min_r, default_max_r = 8, 500
-            if meta.scale_um_per_px is not None:
-                scale = meta.scale_um_per_px
-                default_min_r = max(3, int(2.5 / scale))
-                default_max_r = max(default_min_r + 1, int(25.0 / scale))
-
-            min_radius = st.slider("Min radius (px)", 3, 2000, default_min_r)
-            max_radius = st.slider("Max radius (px)", 10, 5000, default_max_r)
-            sensitivity = st.slider("Sensitivity", 0.1, 1.0, 0.85, 0.05)
-            min_distance = st.slider("Min distance (px)", 5, 1000, 15)
-            blur_sigma = st.slider("Blur sigma", 0.5, 20.0, 2.0, 0.5)
-            membrane_width = st.slider("Membrane width (px)", 1.0, 30.0, 4.0, 1.0)
-            circularity = st.slider("Min circularity", 0.3, 1.0, 0.65, 0.05)
-            use_clahe = st.checkbox("Use CLAHE", value=True)
-            # TODO: move to dedicated "Advanced Settings" expander in future release
-            overlap_threshold = st.slider(
-                "Overlap threshold", 0.0, 1.0, 0.30, 0.05,
-                help="Min overlap area (fraction of smaller GUV) to flag a pair. "
-                     "0 = any touching, 1 = fully contained.",
-            )
-
-            col1, col2 = st.columns(2)
-            with col1:
-                detect_clicked = st.button("Detect GUVs", type="primary", use_container_width=True)
-            with col2:
-                clear_clicked = st.button("Clear", use_container_width=True)
-
-            if detect_clicked:
-                channel_data = st.session_state.channel_data
-                if channel_data is not None:
-                    params = DetectionParams(
-                        min_radius_px=min_radius,
-                        max_radius_px=max_radius,
-                        blur_sigma=blur_sigma,
-                        sensitivity=sensitivity,
-                        min_distance_px=min_distance,
-                        use_clahe=use_clahe,
-                        circularity_min=circularity,
-                    )
-                    with st.spinner("Detecting GUVs..."):
-                        guvs = detect_guvs(channel_data[det_channel], params)
-                        # Measure fluorescence
-                        measurements = []
-                        for guv in guvs:
-                            fl = measure_all_channels(channel_data, guv, membrane_width)
-                            diameter_um = None
-                            if meta.scale_um_per_px is not None:
-                                diameter_um = guv.diameter_px * meta.scale_um_per_px
-                            measurements.append(GUVMeasurement(
-                                guv=guv, diameter_um=diameter_um, fluorescence=fl,
-                            ))
-                        scale = meta.scale_um_per_px
-                        colors = meta.channel_colors
-                        df = build_dataframe(measurements, scale, colors)
-
-                    # Overlap detection
-                    h_img, w_img = channel_data.shape[1], channel_data.shape[2]
-                    overlap_groups = find_overlaps(guvs, padding_px=20,
-                                                   img_width=w_img, img_height=h_img,
-                                                   overlap_threshold=overlap_threshold)
-
-                    st.session_state.guvs = guvs
-                    st.session_state.measurements = measurements
-                    st.session_state.results_df = df
+                if needs_load:
+                    try:
+                        channel_data, metadata = cached_load_image(
+                            file_bytes, uploaded.name, series_index
+                        )
+                    except Exception as e:
+                        st.error(f"Failed to load image: {e}")
+                        return
+                    st.session_state.channel_data = channel_data
+                    st.session_state.metadata = metadata
+                    st.session_state.uploaded_file_id = file_id
+                    st.session_state.series_index = series_index
+                    st.session_state.guvs = []
+                    st.session_state.measurements = []
+                    st.session_state.results_df = None
                     st.session_state.highlight_id = None
-                    st.session_state.overlap_groups = overlap_groups
+                    st.session_state.overlap_groups = []
                     st.session_state.excluded_ids = set()
                     st.session_state.selected_group_idx = 0
-                    st.rerun()
 
-            if clear_clicked:
-                st.session_state.guvs = []
-                st.session_state.measurements = []
-                st.session_state.results_df = None
-                st.session_state.highlight_id = None
-                st.session_state.overlap_groups = []
-                st.session_state.excluded_ids = set()
-                st.session_state.selected_group_idx = 0
-                st.rerun()
+        with top_right:
+            meta: ImageMetadata | None = st.session_state.metadata
+            if meta is not None:
+                info_cols = st.columns(5)
+                info_cols[0].metric("File", meta.filepath.name)
+                info_cols[1].metric("Size", f"{meta.width}x{meta.height}")
+                info_cols[2].metric("Channels", str(meta.num_channels))
+                scale_str = f"{meta.scale_um_per_px:.4f}" if meta.scale_um_per_px else "N/A"
+                info_cols[3].metric("Scale (µm/px)", scale_str)
+                info_cols[4].metric("Quantitative", "Yes" if meta.quantitative else "No")
 
-        # ── Feedback ────────────────────────────────────────────────────
-        st.divider()
-        with st.expander("Send Feedback"):
-            fb_category = st.selectbox("Category", CATEGORIES, key="fb_category")
-            fb_text = st.text_area(
-                "Description",
-                placeholder="Describe the bug, feature request, or feedback...",
-                key="fb_text",
-            )
-            if st.button("Submit Feedback", key="fb_submit"):
-                if fb_text.strip():
-                    image_format = None
-                    if meta is not None:
-                        image_format = meta.filepath.suffix
-                    open_feedback(fb_category, fb_text, image_format)
-                    st.success("Feedback page opened in your browser!")
-                else:
-                    st.warning("Please enter a description.")
-
-    # ── MAIN AREA ────────────────────────────────────────────────────────
+    # ── Bail early if no image loaded ────────────────────────────────────
     channel_data = st.session_state.channel_data
     meta = st.session_state.metadata
 
@@ -379,170 +258,279 @@ def main():
         st.info("Upload a microscopy image (.tif, .tiff, .lif, .jpg, .png) to get started.")
         return
 
-    # Render image
-    if display_mode == "Composite":
-        rgb = render_composite(channel_data, meta.channel_colors, meta.display_ranges)
-    else:
-        ch_idx = min(selected_channel, channel_data.shape[0] - 1)
-        color = meta.channel_colors[ch_idx] if ch_idx < len(meta.channel_colors) else "gray"
-        lo, hi = meta.display_ranges[ch_idx] if ch_idx < len(meta.display_ranges) else (0, 255)
-        rgb = render_channel(channel_data[ch_idx], color, lo, hi)
+    # ── Build channel name list (needed by both panels) ──────────────────
+    ch_names = []
+    for i in range(meta.num_channels):
+        color = meta.channel_colors[i] if i < len(meta.channel_colors) else "?"
+        ch_names.append(f"Ch{i+1} ({color})")
 
-    # Draw GUV overlays
-    guvs = st.session_state.guvs
-    highlight_id = st.session_state.highlight_id
-    excluded_ids: set[int] = st.session_state.excluded_ids
-    if guvs:
-        rgb = draw_guv_overlay(rgb, guvs, highlight_id, excluded_ids)
+    # ── TWO-COLUMN LAYOUT: [main content (3) | detection panel (1)] ──────
+    main_col, right_col = st.columns([3, 1], gap="medium")
 
-    # ── Tabbed layout: Image | Overlaps | Results ────────────────────
-    overlap_groups = st.session_state.overlap_groups
-    df: pd.DataFrame | None = st.session_state.results_df
+    # ── RIGHT COLUMN: Detection parameters ───────────────────────────────
+    with right_col:
+        st.subheader("Detection")
 
-    tab_names = ["Image"]
-    if overlap_groups:
-        tab_names.append(f"Overlaps ({len(overlap_groups)})")
-    if df is not None and not df.empty:
-        tab_names.append(f"Results ({len(df)})")
-
-    tabs = st.tabs(tab_names)
-    tab_idx = 0
-
-    # ── Image tab ────────────────────────────────────────────────────
-    with tabs[tab_idx]:
-        # Downscale for display — cap at 800px wide to avoid excessive zoom
-        h, w = rgb.shape[:2]
-        max_display_w = 800
-        if w > max_display_w:
-            scale_factor = max_display_w / w
-            display_h = int(h * scale_factor)
-            display_rgb = cv2.resize(rgb, (max_display_w, display_h),
-                                     interpolation=cv2.INTER_AREA)
-        else:
-            display_rgb = rgb
-        st.image(display_rgb, use_container_width=False)
-
-        # Summary line under image
-        if guvs:
-            n_excluded = len(excluded_ids)
-            n_overlaps = len(overlap_groups)
-            summary = f"**{len(guvs)} GUV(s) detected**"
-            if n_overlaps:
-                summary += f" · {n_overlaps} overlap group(s)"
-            if n_excluded:
-                summary += f" · {n_excluded} excluded"
-            st.caption(summary)
-    tab_idx += 1
-
-    # ── Overlaps tab ─────────────────────────────────────────────────
-    if overlap_groups:
-        with tabs[tab_idx]:
-            all_overlap_ids = {gid for grp in overlap_groups for gid in grp.guv_ids}
-            st.warning(
-                f"{len(overlap_groups)} overlap group(s) found "
-                f"({len(all_overlap_ids)} GUVs involved). "
-                "Overlapping GUVs may corrupt fluorescence measurements."
+        det_channel = 0
+        if meta.num_channels > 1:
+            det_channel = st.selectbox(
+                "Detection channel", range(len(ch_names)),
+                format_func=lambda i: ch_names[i],
+                key="det_ch",
             )
 
-            # Group selector
-            group_names = [f"Group {g.group_id} — GUVs {g.guv_ids}" for g in overlap_groups]
-            selected_group_idx = st.selectbox(
-                "Select group", range(len(group_names)),
-                format_func=lambda i: group_names[i],
-                key="overlap_group_select",
-            )
-            st.session_state.selected_group_idx = selected_group_idx
+        # Scale-aware defaults
+        default_min_r, default_max_r = 8, 500
+        if meta.scale_um_per_px is not None:
+            sc = meta.scale_um_per_px
+            default_min_r = max(3, int(2.5 / sc))
+            default_max_r = max(default_min_r + 1, int(25.0 / sc))
 
-            # Magnified crop of the selected group
-            group = overlap_groups[selected_group_idx]
-            x_min, y_min, x_max, y_max = group.bbox
-            crop = rgb[y_min:y_max, x_min:x_max].copy()
-            if crop.size > 0:
-                st.image(crop, caption=f"Group {group.group_id} magnified", width=400)
+        min_radius = st.slider("Min radius (px)", 3, 2000, default_min_r)
+        max_radius = st.slider("Max radius (px)", 10, 5000, default_max_r)
+        sensitivity = st.slider("Sensitivity", 0.1, 1.0, 0.85, 0.05)
+        min_distance = st.slider("Min distance (px)", 5, 1000, 15)
+        blur_sigma = st.slider("Blur sigma", 0.5, 20.0, 2.0, 0.5)
+        membrane_width = st.slider("Membrane width (px)", 1.0, 30.0, 4.0, 1.0)
+        circularity = st.slider("Min circularity", 0.3, 1.0, 0.65, 0.05)
+        use_clahe = st.checkbox("Use CLAHE", value=True)
+        overlap_threshold = st.slider(
+            "Overlap threshold", 0.0, 1.0, 0.30, 0.05,
+            help="Min overlap area (fraction of smaller GUV) to flag a pair. "
+                 "0 = any touching, 1 = fully contained.",
+        )
 
-            # Per-GUV checkboxes
-            guv_map = {g.id: g for g in guvs}
-            st.write("**Include/exclude GUVs in this group** (uncheck to exclude):")
-            for gid in group.guv_ids:
-                guv = guv_map.get(gid)
-                if guv is None:
-                    continue
-                if meta.scale_um_per_px is not None:
-                    d_um = guv.diameter_px * meta.scale_um_per_px
-                    label = f"GUV #{gid}  (d={d_um:.1f} \u00b5m)"
-                else:
-                    label = f"GUV #{gid}  (d={guv.diameter_px:.0f} px)"
-                included = st.checkbox(
-                    label,
-                    value=(gid not in excluded_ids),
-                    key=f"overlap_cb_{gid}",
+        btn1, btn2 = st.columns(2)
+        with btn1:
+            detect_clicked = st.button("Detect", type="primary", use_container_width=True)
+        with btn2:
+            clear_clicked = st.button("Clear", use_container_width=True)
+
+        if detect_clicked:
+            if channel_data is not None:
+                params = DetectionParams(
+                    min_radius_px=min_radius,
+                    max_radius_px=max_radius,
+                    blur_sigma=blur_sigma,
+                    sensitivity=sensitivity,
+                    min_distance_px=min_distance,
+                    use_clahe=use_clahe,
+                    circularity_min=circularity,
                 )
-                if included and gid in excluded_ids:
-                    st.session_state.excluded_ids.discard(gid)
-                    st.rerun()
-                elif not included and gid not in excluded_ids:
-                    st.session_state.excluded_ids.add(gid)
-                    st.rerun()
+                with st.spinner("Detecting GUVs..."):
+                    guvs = detect_guvs(channel_data[det_channel], params)
+                    measurements = []
+                    for guv in guvs:
+                        fl = measure_all_channels(channel_data, guv, membrane_width)
+                        diameter_um = None
+                        if meta.scale_um_per_px is not None:
+                            diameter_um = guv.diameter_px * meta.scale_um_per_px
+                        measurements.append(GUVMeasurement(
+                            guv=guv, diameter_um=diameter_um, fluorescence=fl,
+                        ))
+                    scale = meta.scale_um_per_px
+                    colors = meta.channel_colors
+                    df = build_dataframe(measurements, scale, colors)
 
-            # Nuke button
-            if st.button("Exclude All Overlapping", type="primary"):
-                st.session_state.excluded_ids |= all_overlap_ids
+                h_img, w_img = channel_data.shape[1], channel_data.shape[2]
+                overlap_groups = find_overlaps(guvs, padding_px=20,
+                                               img_width=w_img, img_height=h_img,
+                                               overlap_threshold=overlap_threshold)
+
+                st.session_state.guvs = guvs
+                st.session_state.measurements = measurements
+                st.session_state.results_df = df
+                st.session_state.highlight_id = None
+                st.session_state.overlap_groups = overlap_groups
+                st.session_state.excluded_ids = set()
+                st.session_state.selected_group_idx = 0
                 st.rerun()
+
+        if clear_clicked:
+            st.session_state.guvs = []
+            st.session_state.measurements = []
+            st.session_state.results_df = None
+            st.session_state.highlight_id = None
+            st.session_state.overlap_groups = []
+            st.session_state.excluded_ids = set()
+            st.session_state.selected_group_idx = 0
+            st.rerun()
+
+        st.divider()
+        with st.expander("Feedback"):
+            fb_category = st.selectbox("Category", CATEGORIES, key="fb_category")
+            fb_text = st.text_area(
+                "Description",
+                placeholder="Describe the bug or request...",
+                key="fb_text",
+            )
+            if st.button("Submit", key="fb_submit"):
+                if fb_text.strip():
+                    image_format = meta.filepath.suffix if meta else None
+                    open_feedback(fb_category, fb_text, image_format)
+                    st.success("Feedback page opened!")
+                else:
+                    st.warning("Please enter a description.")
+
+    # ── LEFT COLUMN: Image + tabs ────────────────────────────────────────
+    with main_col:
+        # Display channel selector — above image
+        display_options = ch_names + (["Composite"] if meta.num_channels > 1 else [])
+        display_choice = st.radio("Display", display_options, horizontal=True,
+                                  label_visibility="collapsed")
+
+        if display_choice == "Composite":
+            display_mode = "Composite"
+            selected_channel = 0
+        else:
+            display_mode = "Selected Channel"
+            selected_channel = display_options.index(display_choice)
+
+        # Render image
+        if display_mode == "Composite":
+            rgb = render_composite(channel_data, meta.channel_colors, meta.display_ranges)
+        else:
+            ch_idx = min(selected_channel, channel_data.shape[0] - 1)
+            color = meta.channel_colors[ch_idx] if ch_idx < len(meta.channel_colors) else "gray"
+            lo, hi = meta.display_ranges[ch_idx] if ch_idx < len(meta.display_ranges) else (0, 255)
+            rgb = render_channel(channel_data[ch_idx], color, lo, hi)
+
+        # Draw GUV overlays
+        guvs = st.session_state.guvs
+        highlight_id = st.session_state.highlight_id
+        excluded_ids: set[int] = st.session_state.excluded_ids
+        if guvs:
+            rgb = draw_guv_overlay(rgb, guvs, highlight_id, excluded_ids)
+
+        # Tabbed layout
+        overlap_groups = st.session_state.overlap_groups
+        df: pd.DataFrame | None = st.session_state.results_df
+
+        tab_names = ["Image"]
+        if overlap_groups:
+            tab_names.append(f"Overlaps ({len(overlap_groups)})")
+        if df is not None and not df.empty:
+            tab_names.append(f"Results ({len(df)})")
+
+        tabs = st.tabs(tab_names)
+        tab_idx = 0
+
+        # ── Image tab ────────────────────────────────────────────────
+        with tabs[tab_idx]:
+            st.image(rgb, use_container_width=True)
+            if guvs:
+                n_excluded = len(excluded_ids)
+                n_overlaps = len(overlap_groups)
+                summary = f"**{len(guvs)} GUV(s) detected**"
+                if n_overlaps:
+                    summary += f" · {n_overlaps} overlap group(s)"
+                if n_excluded:
+                    summary += f" · {n_excluded} excluded"
+                st.caption(summary)
         tab_idx += 1
 
-    # ── Results tab ──────────────────────────────────────────────────
-    if df is not None and not df.empty:
-        with tabs[tab_idx]:
-            if not meta.quantitative:
+        # ── Overlaps tab ─────────────────────────────────────────────
+        if overlap_groups:
+            with tabs[tab_idx]:
+                all_overlap_ids = {gid for grp in overlap_groups for gid in grp.guv_ids}
                 st.warning(
-                    "This image format does not preserve quantitative fluorescence values. "
-                    "Fluorescence measurements are relative only."
+                    f"{len(overlap_groups)} overlap group(s) found "
+                    f"({len(all_overlap_ids)} GUVs involved). "
+                    "Overlapping GUVs may corrupt fluorescence measurements."
                 )
 
-            # Interactive dataframe with row selection
-            event = st.dataframe(
-                df,
-                on_select="rerun",
-                selection_mode="single-row",
-                use_container_width=True,
-            )
+                group_names = [f"Group {g.group_id} — GUVs {g.guv_ids}" for g in overlap_groups]
+                selected_group_idx = st.selectbox(
+                    "Select group", range(len(group_names)),
+                    format_func=lambda i: group_names[i],
+                    key="overlap_group_select",
+                )
+                st.session_state.selected_group_idx = selected_group_idx
 
-            # Handle row selection → highlight GUV
-            if event and event.selection and event.selection.rows:
-                row_idx = event.selection.rows[0]
-                selected_id = int(df.iloc[row_idx]["ID"])
-                if selected_id != st.session_state.highlight_id:
-                    st.session_state.highlight_id = selected_id
+                group = overlap_groups[selected_group_idx]
+                x_min, y_min, x_max, y_max = group.bbox
+                crop = rgb[y_min:y_max, x_min:x_max].copy()
+                if crop.size > 0:
+                    st.image(crop, caption=f"Group {group.group_id} magnified", width=400)
+
+                guv_map = {g.id: g for g in guvs}
+                st.write("**Include/exclude GUVs in this group** (uncheck to exclude):")
+                for gid in group.guv_ids:
+                    guv = guv_map.get(gid)
+                    if guv is None:
+                        continue
+                    if meta.scale_um_per_px is not None:
+                        d_um = guv.diameter_px * meta.scale_um_per_px
+                        label = f"GUV #{gid}  (d={d_um:.1f} \u00b5m)"
+                    else:
+                        label = f"GUV #{gid}  (d={guv.diameter_px:.0f} px)"
+                    included = st.checkbox(
+                        label,
+                        value=(gid not in excluded_ids),
+                        key=f"overlap_cb_{gid}",
+                    )
+                    if included and gid in excluded_ids:
+                        st.session_state.excluded_ids.discard(gid)
+                        st.rerun()
+                    elif not included and gid not in excluded_ids:
+                        st.session_state.excluded_ids.add(gid)
+                        st.rerun()
+
+                if st.button("Exclude All Overlapping", type="primary"):
+                    st.session_state.excluded_ids |= all_overlap_ids
                     st.rerun()
+            tab_idx += 1
 
-            # Export buttons — filter excluded GUVs
-            for m in st.session_state.measurements:
-                m.guv.excluded = (m.guv.id in st.session_state.excluded_ids)
-            active_measurements = filter_active_measurements(st.session_state.measurements)
-            export_scale = meta.scale_um_per_px if meta else None
-            export_colors = meta.channel_colors if meta else None
-            export_df = build_dataframe(active_measurements, export_scale, export_colors)
+        # ── Results tab ──────────────────────────────────────────────
+        if df is not None and not df.empty:
+            with tabs[tab_idx]:
+                if not meta.quantitative:
+                    st.warning(
+                        "This image format does not preserve quantitative fluorescence values. "
+                        "Fluorescence measurements are relative only."
+                    )
 
-            col1, col2 = st.columns(2)
-            with col1:
-                csv_data = export_df.to_csv(index=False).encode("utf-8")
-                st.download_button(
-                    "Download CSV",
-                    data=csv_data,
-                    file_name="guv_results.csv",
-                    mime="text/csv",
+                event = st.dataframe(
+                    df,
+                    on_select="rerun",
+                    selection_mode="single-row",
                     use_container_width=True,
                 )
-            with col2:
-                buf = io.BytesIO()
-                export_df.to_excel(buf, index=False, engine="openpyxl")
-                st.download_button(
-                    "Download Excel",
-                    data=buf.getvalue(),
-                    file_name="guv_results.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                )
+
+                if event and event.selection and event.selection.rows:
+                    row_idx = event.selection.rows[0]
+                    selected_id = int(df.iloc[row_idx]["ID"])
+                    if selected_id != st.session_state.highlight_id:
+                        st.session_state.highlight_id = selected_id
+                        st.rerun()
+
+                for m in st.session_state.measurements:
+                    m.guv.excluded = (m.guv.id in st.session_state.excluded_ids)
+                active_measurements = filter_active_measurements(st.session_state.measurements)
+                export_scale = meta.scale_um_per_px if meta else None
+                export_colors = meta.channel_colors if meta else None
+                export_df = build_dataframe(active_measurements, export_scale, export_colors)
+
+                dl1, dl2 = st.columns(2)
+                with dl1:
+                    csv_data = export_df.to_csv(index=False).encode("utf-8")
+                    st.download_button(
+                        "Download CSV",
+                        data=csv_data,
+                        file_name="guv_results.csv",
+                        mime="text/csv",
+                        use_container_width=True,
+                    )
+                with dl2:
+                    buf = io.BytesIO()
+                    export_df.to_excel(buf, index=False, engine="openpyxl")
+                    st.download_button(
+                        "Download Excel",
+                        data=buf.getvalue(),
+                        file_name="guv_results.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
 
 
 if __name__ == "__main__":
