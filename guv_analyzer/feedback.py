@@ -19,7 +19,7 @@ from . import __version__
 
 FEEDBACK_CONFIG = {
     "method": "github",
-    "github_url": "https://github.com/USER/REPO/issues/new",
+    "github_url": "https://github.com/bshlee/guv-analyzer/issues/new",
     "github_labels": "feedback",
     "google_form_url": "",
     "mailto_address": "",
