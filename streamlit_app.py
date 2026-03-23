@@ -242,13 +242,15 @@ def main():
         with top_right:
             meta: ImageMetadata | None = st.session_state.metadata
             if meta is not None:
-                info_cols = st.columns(5)
-                info_cols[0].metric("File", meta.filepath.name)
-                info_cols[1].metric("Size", f"{meta.width}x{meta.height}")
-                info_cols[2].metric("Channels", str(meta.num_channels))
-                scale_str = f"{meta.scale_um_per_px:.4f}" if meta.scale_um_per_px else "N/A"
-                info_cols[3].metric("Scale (µm/px)", scale_str)
-                info_cols[4].metric("Quantitative", "Yes" if meta.quantitative else "No")
+                scale_str = f"{meta.scale_um_per_px:.4f} µm/px" if meta.scale_um_per_px else "N/A"
+                quant_str = "Yes" if meta.quantitative else "No"
+                st.markdown(
+                    f"**{meta.filepath.name}** · "
+                    f"{meta.width} x {meta.height} · "
+                    f"{meta.num_channels} ch · "
+                    f"Scale: {scale_str} · "
+                    f"Quantitative: {quant_str}",
+                )
 
     # ── Bail early if no image loaded ────────────────────────────────────
     channel_data = st.session_state.channel_data
@@ -410,21 +412,17 @@ def main():
         if guvs:
             rgb = draw_guv_overlay(rgb, guvs, highlight_id, excluded_ids)
 
-        # Tabbed layout
+        # ── Image + Overlap side-by-side ─────────────────────────────
         overlap_groups = st.session_state.overlap_groups
         df: pd.DataFrame | None = st.session_state.results_df
 
-        tab_names = ["Image"]
         if overlap_groups:
-            tab_names.append(f"Overlaps ({len(overlap_groups)})")
-        if df is not None and not df.empty:
-            tab_names.append(f"Results ({len(df)})")
+            overlap_col, img_col = st.columns([1, 2], gap="medium")
+        else:
+            img_col = st.container()
+            overlap_col = None
 
-        tabs = st.tabs(tab_names)
-        tab_idx = 0
-
-        # ── Image tab ────────────────────────────────────────────────
-        with tabs[tab_idx]:
+        with img_col:
             st.image(rgb, use_container_width=True)
             if guvs:
                 n_excluded = len(excluded_ids)
@@ -435,16 +433,14 @@ def main():
                 if n_excluded:
                     summary += f" · {n_excluded} excluded"
                 st.caption(summary)
-        tab_idx += 1
 
-        # ── Overlaps tab ─────────────────────────────────────────────
-        if overlap_groups:
-            with tabs[tab_idx]:
+        # ── Overlap panel (beside image) ─────────────────────────────
+        if overlap_groups and overlap_col is not None:
+            with overlap_col:
                 all_overlap_ids = {gid for grp in overlap_groups for gid in grp.guv_ids}
                 st.warning(
-                    f"{len(overlap_groups)} overlap group(s) found "
-                    f"({len(all_overlap_ids)} GUVs involved). "
-                    "Overlapping GUVs may corrupt fluorescence measurements."
+                    f"{len(overlap_groups)} overlap group(s) — "
+                    f"{len(all_overlap_ids)} GUVs involved"
                 )
 
                 group_names = [f"Group {g.group_id} — GUVs {g.guv_ids}" for g in overlap_groups]
@@ -459,10 +455,10 @@ def main():
                 x_min, y_min, x_max, y_max = group.bbox
                 crop = rgb[y_min:y_max, x_min:x_max].copy()
                 if crop.size > 0:
-                    st.image(crop, caption=f"Group {group.group_id} magnified", width=400)
+                    st.image(crop, caption=f"Group {group.group_id} magnified",
+                             use_container_width=True)
 
                 guv_map = {g.id: g for g in guvs}
-                st.write("**Include/exclude GUVs in this group** (uncheck to exclude):")
                 for gid in group.guv_ids:
                     guv = guv_map.get(gid)
                     if guv is None:
@@ -487,58 +483,59 @@ def main():
                 if st.button("Exclude All Overlapping", type="primary"):
                     st.session_state.excluded_ids |= all_overlap_ids
                     st.rerun()
-            tab_idx += 1
 
-        # ── Results tab ──────────────────────────────────────────────
+        # ── Results table (below image) ──────────────────────────────
         if df is not None and not df.empty:
-            with tabs[tab_idx]:
-                if not meta.quantitative:
-                    st.warning(
-                        "This image format does not preserve quantitative fluorescence values. "
-                        "Fluorescence measurements are relative only."
-                    )
+            st.divider()
+            st.subheader(f"Results — {len(df)} GUV(s) detected")
 
-                event = st.dataframe(
-                    df,
-                    on_select="rerun",
-                    selection_mode="single-row",
-                    use_container_width=True,
+            if not meta.quantitative:
+                st.warning(
+                    "This image format does not preserve quantitative fluorescence values. "
+                    "Fluorescence measurements are relative only."
                 )
 
-                if event and event.selection and event.selection.rows:
-                    row_idx = event.selection.rows[0]
-                    selected_id = int(df.iloc[row_idx]["ID"])
-                    if selected_id != st.session_state.highlight_id:
-                        st.session_state.highlight_id = selected_id
-                        st.rerun()
+            event = st.dataframe(
+                df,
+                on_select="rerun",
+                selection_mode="single-row",
+                use_container_width=True,
+            )
 
-                for m in st.session_state.measurements:
-                    m.guv.excluded = (m.guv.id in st.session_state.excluded_ids)
-                active_measurements = filter_active_measurements(st.session_state.measurements)
-                export_scale = meta.scale_um_per_px if meta else None
-                export_colors = meta.channel_colors if meta else None
-                export_df = build_dataframe(active_measurements, export_scale, export_colors)
+            if event and event.selection and event.selection.rows:
+                row_idx = event.selection.rows[0]
+                selected_id = int(df.iloc[row_idx]["ID"])
+                if selected_id != st.session_state.highlight_id:
+                    st.session_state.highlight_id = selected_id
+                    st.rerun()
 
-                dl1, dl2 = st.columns(2)
-                with dl1:
-                    csv_data = export_df.to_csv(index=False).encode("utf-8")
-                    st.download_button(
-                        "Download CSV",
-                        data=csv_data,
-                        file_name="guv_results.csv",
-                        mime="text/csv",
-                        use_container_width=True,
-                    )
-                with dl2:
-                    buf = io.BytesIO()
-                    export_df.to_excel(buf, index=False, engine="openpyxl")
-                    st.download_button(
-                        "Download Excel",
-                        data=buf.getvalue(),
-                        file_name="guv_results.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        use_container_width=True,
-                    )
+            for m in st.session_state.measurements:
+                m.guv.excluded = (m.guv.id in st.session_state.excluded_ids)
+            active_measurements = filter_active_measurements(st.session_state.measurements)
+            export_scale = meta.scale_um_per_px if meta else None
+            export_colors = meta.channel_colors if meta else None
+            export_df = build_dataframe(active_measurements, export_scale, export_colors)
+
+            dl1, dl2 = st.columns(2)
+            with dl1:
+                csv_data = export_df.to_csv(index=False).encode("utf-8")
+                st.download_button(
+                    "Download CSV",
+                    data=csv_data,
+                    file_name="guv_results.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
+            with dl2:
+                buf = io.BytesIO()
+                export_df.to_excel(buf, index=False, engine="openpyxl")
+                st.download_button(
+                    "Download Excel",
+                    data=buf.getvalue(),
+                    file_name="guv_results.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
 
 
 if __name__ == "__main__":
