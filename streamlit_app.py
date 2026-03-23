@@ -279,19 +279,28 @@ def main():
                 key="det_ch",
             )
 
-        # Scale-aware defaults
-        default_min_r, default_max_r = 8, 500
-        if meta.scale_um_per_px is not None:
-            sc = meta.scale_um_per_px
-            default_min_r = max(3, int(2.5 / sc))
-            default_max_r = max(default_min_r + 1, int(25.0 / sc))
+        # Scale-aware sliders: show µm when scale is known, px otherwise
+        sc = meta.scale_um_per_px
+        has_scale = sc is not None
 
-        min_radius = st.slider("Min radius (px)", 3, 2000, default_min_r)
-        max_radius = st.slider("Max radius (px)", 10, 5000, default_max_r)
+        if has_scale:
+            min_radius_um = st.slider("Min radius (µm)", 0.5, 200.0, 2.5, 0.5)
+            max_radius_um = st.slider("Max radius (µm)", 1.0, 500.0, 25.0, 0.5)
+            min_distance_um = st.slider("Min distance (µm)", 0.5, 100.0, 5.0, 0.5)
+            membrane_width_um = st.slider("Membrane width (µm)", 0.1, 10.0, 1.5, 0.1)
+            # Convert µm → px
+            min_radius = max(3, int(round(min_radius_um / sc)))
+            max_radius = max(min_radius + 1, int(round(max_radius_um / sc)))
+            min_distance = max(5, int(round(min_distance_um / sc)))
+            membrane_width = max(1.0, membrane_width_um / sc)
+        else:
+            min_radius = st.slider("Min radius (px)", 3, 2000, 8)
+            max_radius = st.slider("Max radius (px)", 10, 5000, 500)
+            min_distance = st.slider("Min distance (px)", 5, 1000, 15)
+            membrane_width = st.slider("Membrane width (px)", 1.0, 30.0, 4.0, 1.0)
+
         sensitivity = st.slider("Sensitivity", 0.1, 1.0, 0.85, 0.05)
-        min_distance = st.slider("Min distance (px)", 5, 1000, 15)
         blur_sigma = st.slider("Blur sigma", 0.5, 20.0, 2.0, 0.5)
-        membrane_width = st.slider("Membrane width (px)", 1.0, 30.0, 4.0, 1.0)
         circularity = st.slider("Min circularity", 0.3, 1.0, 0.65, 0.05)
         use_clahe = st.checkbox("Use CLAHE", value=True)
         overlap_threshold = st.slider(
@@ -323,14 +332,13 @@ def main():
                     for guv in guvs:
                         fl = measure_all_channels(channel_data, guv, membrane_width)
                         diameter_um = None
-                        if meta.scale_um_per_px is not None:
-                            diameter_um = guv.diameter_px * meta.scale_um_per_px
+                        if sc is not None:
+                            diameter_um = guv.diameter_px * sc
                         measurements.append(GUVMeasurement(
                             guv=guv, diameter_um=diameter_um, fluorescence=fl,
                         ))
-                    scale = meta.scale_um_per_px
                     colors = meta.channel_colors
-                    df = build_dataframe(measurements, scale, colors)
+                    df = build_dataframe(measurements, sc, colors)
 
                 h_img, w_img = channel_data.shape[1], channel_data.shape[2]
                 overlap_groups = find_overlaps(guvs, padding_px=20,
