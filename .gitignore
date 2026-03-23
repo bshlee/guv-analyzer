@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Virtual environments
+venv/
+.venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Sample/training data (too large for git)
+Sample/
+
+# Pip install artifacts
+=0.6
+
+# PyInstaller
+*.app
+*.exe
+
+# Claude Code
+CLAUDE.md
+.claude/
